@@ -1,11 +1,35 @@
+import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import Response
 from pydantic import BaseModel, EmailStr, Field
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Prometheus metrics
+http_requests_total = Counter(
+    'http_requests_total',
+    'Total HTTP requests',
+    ['method', 'endpoint', 'status']
+)
+
+http_request_duration_seconds = Histogram(
+    'http_request_duration_seconds',
+    'HTTP request duration in seconds',
+    ['method', 'endpoint']
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = BASE_DIR / "data" / "user_service.db"
@@ -131,10 +155,38 @@ app = FastAPI(
     description="Manage user profiles for the microservices final project.",
 )
 
+# Middleware for metrics and logging
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    method = request.method
+    path = request.url.path
+    
+    logger.info(f"Request: {method} {path}")
+    
+    response = await call_next(request)
+    
+    duration = time.time() - start_time
+    status_code = response.status_code
+    
+    # Record metrics
+    http_requests_total.labels(method=method, endpoint=path, status=status_code).inc()
+    http_request_duration_seconds.labels(method=method, endpoint=path).observe(duration)
+    
+    logger.info(f"Response: {method} {path} - {status_code} - {duration:.3f}s")
+    
+    return response
+
 
 @app.get("/health", tags=["health"])
 def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics", tags=["metrics"])
+def metrics():
+    """Prometheus metrics endpoint"""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post(
@@ -148,8 +200,12 @@ def create_user(
     repo: SQLiteUserRepository = Depends(get_repository),
 ) -> User:
     try:
-        return repo.create_user(payload)
+        logger.info(f"Creating user with email: {payload.email}")
+        user = repo.create_user(payload)
+        logger.info(f"User created successfully: {user.id}")
+        return user
     except ValueError as exc:
+        logger.warning(f"Failed to create user: {str(exc)}")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),

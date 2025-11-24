@@ -24,6 +24,16 @@ def load_user_service(db_path: Path):
     module_name = f"user_service_app_tests_{uuid4().hex}"
     original = os.environ.get("USER_DB_PATH")
     os.environ["USER_DB_PATH"] = str(db_path)
+    
+    # Clear Prometheus registry to avoid metric conflicts when loading module
+    from prometheus_client import REGISTRY
+    collectors_to_remove = list(REGISTRY._collector_to_names.keys())
+    for collector in collectors_to_remove:
+        try:
+            REGISTRY.unregister(collector)
+        except (KeyError, ValueError):
+            pass
+    
     spec = importlib.util.spec_from_file_location(module_name, USER_SERVICE_MAIN)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

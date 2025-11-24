@@ -1,0 +1,58 @@
+name: Docker Compose Integration Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  integration-test:
+    name: Docker Compose Integration Test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build services
+      run: |
+        docker compose build
+        
+    - name: Start services
+      run: |
+        docker compose up -d
+        
+    - name: Wait for services to be ready
+      run: |
+        timeout 60 bash -c 'until curl -f http://localhost:8000/health && curl -f http://localhost:8001/health; do sleep 2; done'
+        
+    - name: Run integration tests
+      run: |
+        # Test user service
+        curl -X POST http://localhost:8000/users \
+          -H "Content-Type: application/json" \
+          -d '{"name": "Test User", "email": "test@example.com"}' | jq .
+        
+        # Test order service
+        USER_ID=$(curl -s -X POST http://localhost:8000/users \
+          -H "Content-Type: application/json" \
+          -d '{"name": "Order User", "email": "order@example.com"}' | jq -r '.id')
+        
+        curl -X POST http://localhost:8001/orders \
+          -H "Content-Type: application/json" \
+          -d "{\"user_id\": \"$USER_ID\", \"items\": [{\"sku\": \"TEST-001\", \"quantity\": 2, \"unit_price\": 10.50}]}" | jq .
+        
+    - name: Check metrics endpoints
+      run: |
+        curl -f http://localhost:8000/metrics
+        curl -f http://localhost:8001/metrics
+        
+    - name: Stop services
+      if: always()
+      run: |
+        docker compose down -v
+

@@ -1,71 +1,116 @@
-## Architecture Overview
+# Project Architecture Overview
 
-### At a Glance
+This document summarizes the current architecture of the microservices platform so the
+README can reference a clean, English-only description. It replaces earlier
+working notes that were removed before publishing the repository.
 
-- **User Service (`user-service`)**
-  - Responsibility: Manage user profiles.
-  - Stack: Python 3.12, FastAPI, Pydantic.
-  - Storage: SQLite database (`user_service.db`) owned exclusively by the service.
-  - Port: 8000.
-  - REST API Highlights:
-    - `POST /users` – create a user.
-    - `GET /users/{user_id}` – fetch user details.
-    - `GET /users` – list users.
-    - `PUT /users/{user_id}` – update user details.
-    - `DELETE /users/{user_id}` – remove a user.
+---
 
-- **Order Service (`order-service`)**
-  - Responsibility: Manage orders and validate the requesting user.
-  - Stack: Python 3.12, FastAPI, Pydantic, `httpx` for cross-service communication.
-  - Storage: SQLite database (`order_service.db`) owned exclusively by the service.
-  - Port: 8001.
-  - REST API Highlights:
-    - `POST /orders` – create an order for a user.
-    - `GET /orders/{order_id}` – fetch order details.
-    - `GET /orders` – list orders.
+## 1. System Components
 
-### Service Interaction
+| Layer            | Components                                                                 | Purpose                                                |
+|------------------|-----------------------------------------------------------------------------|--------------------------------------------------------|
+| Client / Tools   | `curl`, Postman, automated tests                                            | Exercise APIs and produce monitoring data              |
+| Gateway / Ingress| Docker Desktop Kubernetes port-forward (local cluster only)                | Provides controlled local-only access to services      |
+| Application Tier | `user-service`, `order-service` (FastAPI + Python)                         | Implements business logic                              |
+| Data / Storage   | PersistentVolumeClaims (per service) + SQLite files mounted via PVCs       | Ensures state survives pod restarts                    |
+| Observability    | Prometheus, Grafana, Loki, Promtail                                        | Metrics collection, dashboards, log aggregation        |
+| Automation       | GitHub Actions (`ci-cd.yml`), helper scripts in `scripts/`                 | CI/CD, deployment, validation                          |
+
+---
+
+## 2. Microservice Responsibilities
+
+- **user-service**
+  - Manages user CRUD operations.
+  - Exposes `/health` and `/metrics`.
+  - Emits structured logs consumed by Promtail.
+
+- **order-service**
+  - Depends on user-service for validation.
+  - Tracks order lifecycle and external-service call counts.
+  - Exposes the same health/metrics endpoints for consistency.
+
+---
+
+## 3. Kubernetes Resources
+
+Each service is provisioned via manifests under `k8s/`:
+
+- `Deployment`: controls replica count, rolling updates, and probes.
+- `Service (ClusterIP)`: provides stable DNS for intra-cluster access.
+- `ConfigMap`: injects environment variables (DB paths, service URLs, etc.).
+- `PersistentVolumeClaim`: stores SQLite databases and durable artifacts.
+- `HorizontalPodAutoscaler`: scales pods based on CPU/memory.
+
+Monitoring manifests (Prometheus, Grafana, Loki, Promtail) live in
+`k8s/monitoring/` and are applied together with `kubectl apply -k k8s/`.
+
+---
+
+## 4. CI/CD and Automation Flow
 
 ```mermaid
-sequenceDiagram
-    participant Client
-    participant UserService
-    participant OrderService
-
-    Client->>UserService: POST /users
-    UserService-->>Client: 201 Created (user_id)
-
-    Client->>OrderService: POST /orders (user_id, items)
-    OrderService->>UserService: GET /users/{user_id}
-    UserService-->>OrderService: 200 OK (user details)
-    OrderService-->>Client: 201 Created (order_id)
+flowchart LR
+    A[Git Push] --> B[GitHub Actions]
+    B --> C[Run Unit + Integration Tests]
+    B --> D[Build & Push Docker Images]
+    D --> E[Deploy to Kubernetes (kubectl)]
+    E --> F[Smoke Tests / Validation Scripts]
 ```
 
-The order service performs a simple validation step by invoking the user service over HTTP before persisting an order.
+Supporting scripts:
 
-### Local Deployment (Docker Compose)
+- `scripts/deploy-local.sh`: full application stack deployment.
+- `scripts/deploy-monitoring.sh`: Prometheus/Grafana/Loki/Promtail stack.
+- `scripts/verify-networking-scaling-discovery.sh`: validation checks.
 
-Docker Compose provides a shared bridge network (the Compose default) so the services discover each other via DNS and isolates their data stores via named volumes.
+---
 
-- `user-service` container name: `user-service`
-- `order-service` container name: `order-service`
+## 5. Observability Stack
 
-Environment variables configure service dependencies:
+1. **Prometheus**
+   - Scrapes `/metrics` from both services.
+   - Feeds Grafana dashboards.
 
-- `USER_DB_PATH=/home/appuser/app/data/user_service.db`
-- `ORDER_DB_PATH=/home/appuser/app/data/order_service.db`
-- `USER_SERVICE_URL=http://user-service:8000`
+2. **Grafana**
+   - Pre-provisioned data sources (Prometheus + Loki).
+   - Dashboards visualize request throughput, latency, error budgets, and
+     external-service calls.
 
-### Security & Extensibility Notes
+3. **Loki + Promtail**
+   - Promtail DaemonSet forwards pod logs to Loki.
+   - Grafana Explore provides query access even when logs are sparse in the
+     local Docker Desktop environment.
 
-- Docker images run with a non-root user.
-- Configuration is injected via environment variables to avoid hard-coding secrets.
-- Each service owns its storage and can evolve independently (e.g., swap in PostgreSQL, MongoDB).
-- In future phases, replace in-memory stores with persistent databases and register services with Kubernetes DNS.
+---
 
-### Testing Strategy
+## 6. Deployment Workflow (Local Cluster)
 
-- Unit tests cover HTTP route behavior using FastAPI `TestClient`.
-- Integration test (`services/order-service/tests/test_main.py::test_create_order_with_user_service_integration`) spins up the user service with SQLite and exercises the order workflow end-to-end through real HTTP calls.
-- Docker Compose enables additional smoke testing with tools such as `curl` or Postman.
+1. Enable Kubernetes in Docker Desktop and confirm connectivity via
+   `kubectl cluster-info`.
+2. Build images locally (`docker build`) or let CI/CD handle it.
+3. Apply manifests with `kubectl apply -k k8s/`.
+4. Run smoke tests or curl commands against the forwarded ports.
+5. Optionally deploy monitoring stack and view dashboards/logs via
+   port-forwarding.
+
+---
+
+## 7. Security / Access Notes
+
+- Local-only deployment: no ingress controller; port-forwarding is required.
+- Secrets are handled via environment variables (no secrets store required for
+  the final submission).
+- RBAC for Promtail is provisioned via manifests to permit pod log discovery.
+
+---
+
+## 8. Future Improvements
+
+- Introduce a real ingress and TLS termination when targeting cloud clusters.
+- Replace SQLite with managed databases and move PVCs to dynamic provisioners.
+- Add Alertmanager rules and automated alert routing.
+- Extend CI/CD with end-to-end tests running against a temporary cluster.
+
 

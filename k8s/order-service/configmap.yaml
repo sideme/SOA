@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-service-config
+  namespace: default
+data:
+  ORDER_DB_PATH: "/home/appuser/app/data/order_service.db"
+  USER_SERVICE_URL: "http://user-service:8000"
+

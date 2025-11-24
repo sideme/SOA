@@ -1,13 +1,49 @@
 import json
+import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Prometheus metrics
+http_requests_total = Counter(
+    'http_requests_total',
+    'Total HTTP requests',
+    ['method', 'endpoint', 'status']
+)
+
+http_request_duration_seconds = Histogram(
+    'http_request_duration_seconds',
+    'HTTP request duration in seconds',
+    ['method', 'endpoint']
+)
+
+external_service_calls = Counter(
+    'external_service_calls_total',
+    'Total external service calls',
+    ['service', 'status']
+)
+
+external_service_duration = Histogram(
+    'external_service_duration_seconds',
+    'External service call duration in seconds',
+    ['service']
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = BASE_DIR / "data" / "order_service.db"
@@ -111,25 +147,39 @@ class UserServiceClient:
 
     def ensure_user_exists(self, user_id: UUID) -> None:
         url = f"{self.base_url}/users/{user_id}"
+        start_time = time.time()
         try:
+            logger.info(f"Validating user with user-service: {user_id}")
             response = httpx.get(url, timeout=5.0)
+            duration = time.time() - start_time
+            
+            external_service_duration.labels(service="user-service").observe(duration)
+            external_service_calls.labels(service="user-service", status=response.status_code).inc()
+            
+            if response.status_code == status.HTTP_404_NOT_FOUND:
+                logger.warning(f"User not found: {user_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="User does not exist",
+                )
+
+            if not response.is_success:
+                logger.error(f"User service returned error: {response.status_code}")
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Failed to validate user",
+                )
+            
+            logger.info(f"User validated successfully: {user_id}")
         except httpx.RequestError as exc:
+            duration = time.time() - start_time
+            external_service_duration.labels(service="user-service").observe(duration)
+            external_service_calls.labels(service="user-service", status="error").inc()
+            logger.error(f"User service unavailable: {str(exc)}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="User service unavailable",
             ) from exc
-
-        if response.status_code == status.HTTP_404_NOT_FOUND:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User does not exist",
-            )
-
-        if not response.is_success:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Failed to validate user",
-            )
 
 
 def get_user_service_client() -> UserServiceClient:
@@ -153,10 +203,38 @@ app = FastAPI(
     description="Create and retrieve orders while validating users via the user service.",
 )
 
+# Middleware for metrics and logging
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    method = request.method
+    path = request.url.path
+    
+    logger.info(f"Request: {method} {path}")
+    
+    response = await call_next(request)
+    
+    duration = time.time() - start_time
+    status_code = response.status_code
+    
+    # Record metrics
+    http_requests_total.labels(method=method, endpoint=path, status=status_code).inc()
+    http_request_duration_seconds.labels(method=method, endpoint=path).observe(duration)
+    
+    logger.info(f"Response: {method} {path} - {status_code} - {duration:.3f}s")
+    
+    return response
+
 
 @app.get("/health", tags=["health"])
 def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics", tags=["metrics"])
+def metrics():
+    """Prometheus metrics endpoint"""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post(
@@ -170,8 +248,11 @@ def create_order(
     user_client: UserServiceClient = Depends(get_user_service_client),
     repo: SQLiteOrderRepository = Depends(get_repository),
 ) -> Order:
+    logger.info(f"Creating order for user: {payload.user_id} with {len(payload.items)} items")
     user_client.ensure_user_exists(payload.user_id)
-    return repo.create_order(payload)
+    order = repo.create_order(payload)
+    logger.info(f"Order created successfully: {order.id} - Total: ${order.total_amount}")
+    return order
 
 
 @app.get("/orders", response_model=List[Order], tags=["orders"])

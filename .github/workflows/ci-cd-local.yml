@@ -1,0 +1,139 @@
+name: CI/CD Pipeline - Local Kubernetes
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:  
+
+env:
+  KUBERNETES_NAMESPACE: default
+
+jobs:
+  test-user-service:
+    name: Test User Service
+    runs-on: self-hosted  
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        
+    - name: Install dependencies
+      working-directory: ./services/user-service
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run tests
+      working-directory: ./services/user-service
+      run: |
+        pytest tests/ -v
+        
+  test-order-service:
+    name: Test Order Service
+    runs-on: self-hosted
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        
+    - name: Install dependencies
+      working-directory: ./services/order-service
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run tests
+      working-directory: ./services/order-service
+      run: |
+        pytest tests/ -v
+        
+  build-and-deploy:
+    name: Build and Deploy to Local Kubernetes
+    runs-on: self-hosted
+    needs: [test-user-service, test-order-service]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build user-service image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./services/user-service
+        push: false
+        tags: user-service:latest
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
+        
+    - name: Build order-service image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./services/order-service
+        push: false
+        tags: order-service:latest
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
+        
+    - name: Verify kubectl access
+      run: |
+        kubectl cluster-info
+        kubectl get nodes
+        
+    - name: Deploy to Kubernetes
+      run: |
+        # 确保使用本地构建的镜像
+        kubectl apply -k k8s/
+        
+        # 等待部署完成
+        kubectl rollout status deployment/user-service -n ${{ env.KUBERNETES_NAMESPACE }} --timeout=5m
+        kubectl rollout status deployment/order-service -n ${{ env.KUBERNETES_NAMESPACE }} --timeout=5m
+        
+    - name: Verify deployment
+      run: |
+        echo "Checking pod status..."
+        kubectl get pods -n ${{ env.KUBERNETES_NAMESPACE }}
+        
+        echo "Checking services..."
+        kubectl get services -n ${{ env.KUBERNETES_NAMESPACE }}
+        
+        echo "Checking deployments..."
+        kubectl get deployments -n ${{ env.KUBERNETES_NAMESPACE }}
+        
+    - name: Test deployed services
+      run: |
+        # 等待服务就绪
+        sleep 10
+        
+        # 测试健康检查端点（通过 port-forward）
+        kubectl port-forward service/user-service 8000:8000 -n ${{ env.KUBERNETES_NAMESPACE }} &
+        PF_PID=$!
+        sleep 5
+        
+        curl -f http://localhost:8000/health || exit 1
+        
+        kill $PF_PID || true
+        
+        kubectl port-forward service/order-service 8001:8000 -n ${{ env.KUBERNETES_NAMESPACE }} &
+        PF_PID=$!
+        sleep 5
+        
+        curl -f http://localhost:8001/health || exit 1
+        
+        kill $PF_PID || true
+

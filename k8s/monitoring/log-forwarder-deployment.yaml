@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-forwarder
+  namespace: default
+  labels:
+    app: log-forwarder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: log-forwarder
+  template:
+    metadata:
+      labels:
+        app: log-forwarder
+    spec:
+      serviceAccountName: promtail
+      containers:
+      - name: log-forwarder
+        image: bitnami/kubectl:latest
+        command:
+          - /bin/sh
+          - -c
+          - |
+            while true; do
+              # Forward user-service logs
+              kubectl logs -l app=user-service --tail=100 --since=10s 2>/dev/null | \
+              while IFS= read -r line; do
+                if [ -n "$line" ]; then
+                  timestamp=$(date -u +%s%N)
+                  echo "{\"streams\":[{\"stream\":{\"pod\":\"user-service\",\"namespace\":\"default\",\"app\":\"user-service\"},\"values\":[[\"${timestamp}\",\"${line}\"]]}]}" | \
+                  curl -s -X POST -H "Content-Type: application/json" http://loki:3100/loki/api/v1/push --data-binary @- > /dev/null
+                fi
+              done
+              
+              # Forward order-service logs
+              kubectl logs -l app=order-service --tail=100 --since=10s 2>/dev/null | \
+              while IFS= read -r line; do
+                if [ -n "$line" ]; then
+                  timestamp=$(date -u +%s%N)
+                  echo "{\"streams\":[{\"stream\":{\"pod\":\"order-service\",\"namespace\":\"default\",\"app\":\"order-service\"},\"values\":[[\"${timestamp}\",\"${line}\"]]}]}" | \
+                  curl -s -X POST -H "Content-Type: application/json" http://loki:3100/loki/api/v1/push --data-binary @- > /dev/null
+                fi
+              done
+              
+              sleep 5
+            done
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+

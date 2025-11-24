@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-sidecar-config
+  namespace: default
+data:
+  promtail.yml: |
+    server:
+      http_listen_port: 3101
+      grpc_listen_port: 9095
+
+    positions:
+      filename: /tmp/positions.yaml
+
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+
+    scrape_configs:
+      # Read logs from stdout/stderr (sidecar mode)
+      - job_name: sidecar
+        static_configs:
+          - targets:
+              - localhost
+            labels:
+              job: sidecar
+              __path__: /var/log/*.log
+        pipeline_stages:
+          - labels:
+              pod: ${POD_NAME}
+              namespace: ${POD_NAMESPACE}
+              container: ${POD_CONTAINER}
+              app: ${POD_APP}
+

@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: default
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: 'local'
+        environment: 'development'
+
+    scrape_configs:
+      # User Service - using Kubernetes service DNS
+      - job_name: 'user-service'
+        static_configs:
+          - targets: ['user-service:8000']
+            labels:
+              service: 'user-service'
+              namespace: 'default'
+        metrics_path: '/metrics'
+
+      # Order Service - using Kubernetes service DNS
+      - job_name: 'order-service'
+        static_configs:
+          - targets: ['order-service:8000']
+            labels:
+              service: 'order-service'
+              namespace: 'default'
+        metrics_path: '/metrics'
+
+      # Prometheus self-monitoring
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+

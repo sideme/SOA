@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: default
+data:
+  microservices-dashboard.json: |
+    {
+      "title": "Microservices Monitoring",
+      "tags": ["microservices", "prometheus"],
+      "timezone": "browser",
+      "schemaVersion": 27,
+      "version": 1,
+      "panels": [
+          {
+            "id": 1,
+            "title": "HTTP Request Rate",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+            "targets": [
+              {
+                "expr": "rate(http_requests_total[5m])",
+                "legendFormat": "{{method}} {{endpoint}}",
+                "refId": "A"
+              }
+            ],
+            "yaxes": [
+              {"format": "reqps", "label": "Requests/sec"},
+              {"format": "short"}
+            ]
+          },
+          {
+            "id": 2,
+            "title": "HTTP Request Duration (p95)",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))",
+                "legendFormat": "{{method}} {{endpoint}}",
+                "refId": "A"
+              }
+            ],
+            "yaxes": [
+              {"format": "s", "label": "Duration"},
+              {"format": "short"}
+            ]
+          },
+          {
+            "id": 3,
+            "title": "Error Rate",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+            "targets": [
+              {
+                "expr": "rate(http_requests_total{status=~\"5..\"}[5m])",
+                "legendFormat": "{{method}} {{endpoint}}",
+                "refId": "A"
+              }
+            ],
+            "yaxes": [
+              {"format": "reqps", "label": "Errors/sec"},
+              {"format": "short"}
+            ]
+          },
+          {
+            "id": 4,
+            "title": "External Service Calls (Order Service)",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+            "targets": [
+              {
+                "expr": "rate(external_service_calls_total[5m])",
+                "legendFormat": "{{service}} {{status}}",
+                "refId": "A"
+              }
+            ],
+            "yaxes": [
+              {"format": "reqps", "label": "Calls/sec"},
+              {"format": "short"}
+            ]
+          }
+      ],
+      "refresh": "10s"
+    }
+
